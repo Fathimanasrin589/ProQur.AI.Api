@@ -1,4 +1,6 @@
-using ProQur.AI.Api;
+using ProQur.AI.Api.Interfaces;
+using ProQur.AI.Api.Repositories;
+using ProQur.AI.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 // Learning prototype: bind only to this computer and use fictional records.

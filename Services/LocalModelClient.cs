@@ -1,7 +1,8 @@
+using ProQur.AI.Api.Repositories;
 using System.Net.Http.Json;
 using System.Text.Json;
 
-namespace ProQur.AI.Api;
+namespace ProQur.AI.Api.Services;
 
 public sealed class LocalModelClient(HttpClient client)
 {

@@ -1,7 +1,9 @@
 using Microsoft.AspNetCore.Mvc;
+using ProQur.AI.Api.Interfaces;
+using ProQur.AI.Api.Services;
 using System.ComponentModel.DataAnnotations;
 
-namespace ProQur.AI.Api;
+namespace ProQur.AI.Api.Controllers;
 
 public sealed class PrStatusRequest
 {

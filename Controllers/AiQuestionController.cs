@@ -1,11 +1,14 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
+using ProQur.AI.Api.Interfaces;
+using ProQur.AI.Api.Repositories;
+using ProQur.AI.Api.Services;
 using System.ComponentModel.DataAnnotations;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
-namespace ProQur.AI.Api;
+namespace ProQur.AI.Api.Controllers;
 
 public sealed class AiQuestionRequest
 {
@@ -52,10 +55,20 @@ public sealed class AiQuestionController(
             role = "system",
             content =
                 "Classify the user's procurement question. " +
-                "Return ONLY JSON with exactly three fields: " +
-                "intent, identifierType, identifier. " +
+                "Return ONLY JSON with exactly four fields: " +
+                "intent, identifierType, identifier, statusFilter. " +
 
-                "Allowed intents: pr_status, pr_details, unsupported. " +
+                "Allowed intents: pr_status, pr_details, pr_list, unsupported. " +
+
+                "Use pr_list when the user asks to list, show, " +
+                "count, or retrieve multiple PRs based on status. " +
+
+                "Allowed statusFilter values: approved, rejected, " +
+                "pending, cancelled, null. " +
+
+                "For pr_list, set identifierType and identifier to null. " +
+                "Set statusFilter to the requested status. " +
+                "Pending means on-workflow status, not every unfinished PR. " +
 
                 "Use pr_status when the user asks about the status " +
                 "of a purchase requisition. " +
@@ -77,24 +90,42 @@ public sealed class AiQuestionController(
                 "For unsupported return identifierType null " +
                 "and identifier null. " +
 
+
                 "Examples: " +
 
                 "Question: What is the status of PR 43965? " +
                 "Output: {\"intent\":\"pr_status\"," +
                 "\"identifierType\":\"prHeadId\"," +
-                "\"identifier\":\"43965\"}. " +
+                "\"identifier\":\"43965\"," +
+                "\"statusFilter\":null}. " +
 
                 "Question: What is PR-0011111111111111202? " +
                 "Output: {\"intent\":\"pr_details\"," +
                 "\"identifierType\":\"prNumber\"," +
-                "\"identifier\":\"PR-0011111111111111202\"}. " +
+                "\"identifier\":\"PR-0011111111111111202\"," +
+                "\"statusFilter\":null}. " +
 
                 "Question: Is PR-0011111111111111202 approved? " +
                 "Output: {\"intent\":\"pr_status\"," +
                 "\"identifierType\":\"prNumber\"," +
-                "\"identifier\":\"PR-0011111111111111202\"}. " +
+                "\"identifier\":\"PR-0011111111111111202\"," +
+                "\"statusFilter\":null}. " +
+
+                "Question: Show approved PRs. " +
+                "Output: {\"intent\":\"pr_list\"," +
+                "\"identifierType\":null," +
+                "\"identifier\":null," +
+                "\"statusFilter\":\"approved\"}. " +
+
+                "Question: Show pending PRs. " +
+                "Output: {\"intent\":\"pr_list\"," +
+                "\"identifierType\":null," +
+                "\"identifier\":null," +
+                "\"statusFilter\":\"pending\"}. " +
 
                 "Do not answer the user's question."
+
+
         },
         new
         {
@@ -146,11 +177,13 @@ public sealed class AiQuestionController(
 
             // Reject malformed output rather than trusting it.
             // Validate Qwen's JSON structure.
+            // Validate Qwen's JSON structure.
             if (result.ValueKind != JsonValueKind.Object
-                || result.EnumerateObject().Count() != 3
+                || result.EnumerateObject().Count() != 4
                 || !result.TryGetProperty("intent", out var intentElement)
                 || !result.TryGetProperty("identifierType", out var typeElement)
                 || !result.TryGetProperty("identifier", out var identifierElement)
+                || !result.TryGetProperty("statusFilter", out var statusFilterElement)
                 || intentElement.ValueKind != JsonValueKind.String)
             {
                 return StatusCode(502, new
@@ -160,6 +193,149 @@ public sealed class AiQuestionController(
             }
 
             var intent = intentElement.GetString();
+            if (intent == "pr_list")
+            {
+                if (typeElement.ValueKind != JsonValueKind.Null ||
+                    identifierElement.ValueKind != JsonValueKind.Null ||
+                    statusFilterElement.ValueKind != JsonValueKind.String)
+                {
+                    return BadRequest(new
+                    {
+                        message = "Invalid PR listing request."
+                    });
+                }
+
+                var statusFilter = statusFilterElement.GetString();
+
+                int? statusCode = statusFilter switch
+                {
+                    "approved" => 3,
+                    "rejected" => 4,
+                    "pending" => 12,
+                    "cancelled" => 19,
+                    _ => null
+                };
+
+                if (statusCode is null)
+                {
+                    return BadRequest(new
+                    {
+                        message = "Unsupported PR status filter."
+                    });
+                }
+                // Detect whether the user wants only the number of PRs.
+                bool countOnly = Regex.IsMatch(
+                    request.Question,
+                    @"(?i)\b(how many|count|number of|total)\b");
+                // Page 1 by default.
+                // Default to the first page.
+                int page = 1;
+
+                // Detect "page 2", "page 3", etc.
+                var pageMatch = Regex.Match(
+                    request.Question,
+                    @"(?i)\bpage\s+(\d+)\b"
+                );
+
+                if (pageMatch.Success)
+                {
+                    if (!int.TryParse(pageMatch.Groups[1].Value, out page)
+                        || page < 1
+                        || page > 10000)
+                    {
+                        return BadRequest(new
+                        {
+                            message = "Invalid page number."
+                        });
+                    }
+                }
+
+                // Default to 20 PRs unless the user requests a limit.
+                int pageSize = 20;
+
+                // Detect questions such as "Show 10 approved PRs".
+                var limitMatch = Regex.Match(
+                    request.Question,
+                    @"(?i)\b(?:show|list|display|give me|latest|top)\s+(?:me\s+)?(?:the\s+)?(?:latest\s+|top\s+|first\s+)?(\d{1,3})\b"
+                );
+
+
+                if (limitMatch.Success &&
+                    int.TryParse(limitMatch.Groups[1].Value, out int requestedLimit))
+                {
+                    if (requestedLimit < 1 || requestedLimit > 100)
+                    {
+                        return BadRequest(new
+                        {
+                            message = "You can request between 1 and 100 PRs."
+                        });
+                    }
+
+                    pageSize = requestedLimit;
+                }
+
+                try
+                {
+                    var total = await reader.CountAsync(
+                        statusCode.Value,
+                        cancellationToken);
+                    if (countOnly)
+                    {
+                        return Ok(new
+                        {
+                            intent = "pr_list",
+                            operation = "count",
+                            status = statusFilter,
+                            statusCode = statusCode.Value,
+                            total,
+                            databaseQueried = true,
+                            answer = $"There are {total} {statusFilter} PRs.",
+                            retrievedAtUtc = DateTimeOffset.UtcNow
+                        });
+                    }
+
+                    var records = await reader.ListAsync(
+                        statusCode.Value,
+                        page,
+                        pageSize,
+                        cancellationToken);
+
+                    return Ok(new
+                    {
+                        intent = "pr_list",
+                        status = statusFilter,
+                        statusCode = statusCode.Value,
+                        page,
+                        pageSize,
+                        total,
+                        totalPages = (int)Math.Ceiling(
+                            (double)total / pageSize),
+                        databaseQueried = true,
+                        dataSource = "Procqur_QA database",
+                        answer = $"Found {total} {statusFilter} PRs. " +
+                                 $"Showing {records.Count} records.",
+                        records = records.Select(pr => new
+                        {
+                            pr.PRHeadId,
+                            pr.Number,
+                            pr.Name,
+                            pr.RequesterName,
+                            pr.EstimatedCost,
+                            pr.CurrencyCode,
+                            pr.DocumentDate,
+                            pr.ReqStatusId
+                        }),
+                        retrievedAtUtc = DateTimeOffset.UtcNow
+                    });
+                }
+                catch (SqlException)
+                {
+                    return StatusCode(503, new
+                    {
+                        message = "PR listing database query failed."
+                    });
+                }
+            }
 
             if (intent != "pr_status" && intent != "pr_details")
             {
@@ -366,6 +542,7 @@ public sealed class AiQuestionController(
                 $"Is Draft: {Display(facts.IsDraft)}\n" +
                 $"Is Rejected: {Display(facts.IsRejected)}";
         }
+
         else
         {
             answer =
@@ -377,7 +554,58 @@ public sealed class AiQuestionController(
                 approvalSummary +
                 " A specific blocker, next action, and linked PO have not been retrieved.";
         }
+        // Give direct Yes/No answers for specific PR status questions.
+        if (requestedIntent == "pr_status")
+        {
+            var asksRejected = Regex.IsMatch(
+                request.Question,
+                @"(?i)\b(rejected|reject|denied)\b");
 
+            var asksCancelled = Regex.IsMatch(
+                request.Question,
+                @"(?i)\b(cancelled|canceled)\b");
+
+            if (asksRejected && !asksCancelled)
+            {
+                if (facts.ReqStatusId == 4)
+                {
+                    answer = $"Yes. PR {facts.Number} has Denied status (code 4).";
+                }
+                else if (facts.IsRejected == true)
+                {
+                    answer = $"Yes. PR {facts.Number} is marked as rejected.";
+                }
+                else if (facts.IsRejected == false && facts.ReqStatusId.HasValue)
+                {
+                    answer =
+                        $"No. PR {facts.Number} is not marked as rejected. " +
+                        $"Current status: {PrStatusLabels.Get(facts.ReqStatusId)} " +
+                        $"(code {facts.ReqStatusId}).";
+                }
+                else
+                {
+                    answer = $"The rejection status of PR {facts.Number} cannot be confirmed.";
+                }
+            }
+            else if (asksCancelled && !asksRejected)
+            {
+                if (facts.ReqStatusId == 19)
+                {
+                    answer = $"Yes. PR {facts.Number} is currently cancelled.";
+                }
+                else if (facts.ReqStatusId.HasValue)
+                {
+                    answer =
+                        $"No. PR {facts.Number} is not currently cancelled. " +
+                        $"Current status: {PrStatusLabels.Get(facts.ReqStatusId)} " +
+                        $"(code {facts.ReqStatusId}).";
+                }
+                else
+                {
+                    answer = $"The cancellation status of PR {facts.Number} cannot be confirmed.";
+                }
+            }
+        }
         // Step 5: Ask Qwen to explain the retrieved facts.
         string? modelExplanation = null;
         string? warning = null;

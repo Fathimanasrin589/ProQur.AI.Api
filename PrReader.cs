@@ -1,3 +1,5 @@
+using ProQur.AI.Api.Interfaces;
+
 namespace ProQur.AI.Api;
 
 // Only the minimum facts required for the first exercise.
@@ -25,16 +27,6 @@ public sealed record PrFacts(
     string? CurrencyName = null
 );
 
-public interface IPrReader
-{
-    Task<PrFacts?> GetAsync(
-        long id,
-        CancellationToken cancellationToken);
-
-    Task<PrFacts?> GetByNumberAsync(
-        string prNumber,
-        CancellationToken cancellationToken);
-}
 
 public sealed class SamplePrReader : IPrReader
 {
@@ -65,4 +57,22 @@ public sealed class SamplePrReader : IPrReader
         // Sample reader does not support PR reference lookups.
         return Task.FromResult<PrFacts?>(null);
     }
+    public Task<IReadOnlyList<PrFacts>> ListAsync(
+    int statusCode,
+    int page,
+    int pageSize,
+    CancellationToken cancellationToken)
+    {
+        throw new NotSupportedException(
+            "PR listing is not supported by the sample reader.");
+    }
+
+    public Task<int> CountAsync(
+        int statusCode,
+        CancellationToken cancellationToken)
+    {
+        throw new NotSupportedException(
+            "PR counting is not supported by the sample reader.");
+    }
+
 }

@@ -1,7 +1,9 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
+using ProQur.AI.Api.Interfaces;
+using ProQur.AI.Api.Repositories;
 
-namespace ProQur.AI.Api;
+namespace ProQur.AI.Api.Controllers;
 
 [ApiController]
 [Route("api/ai")]

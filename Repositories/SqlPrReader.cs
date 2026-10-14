@@ -1,8 +1,9 @@
 ﻿
 using Dapper;
 using Microsoft.Data.SqlClient;
+using ProQur.AI.Api.Interfaces;
 
-namespace ProQur.AI.Api;
+namespace ProQur.AI.Api.Repositories;
 
 public sealed class SqlPrReader : IPrReader
 {
@@ -182,6 +183,118 @@ public sealed class SqlPrReader : IPrReader
 
         return MapToFacts(rows.SingleOrDefault());
     }
+    //listing
+    public async Task<IReadOnlyList<PrFacts>> ListAsync(
+        int statusCode,
+        int page,
+        int pageSize,
+        CancellationToken cancellationToken)
+    {
+        if (statusCode is not (3 or 4 or 12 or 19))
+            throw new ArgumentOutOfRangeException(nameof(statusCode));
+
+        if (page < 1 || pageSize < 1 || pageSize > 100)
+            throw new ArgumentOutOfRangeException(nameof(page));
+
+        const string sql = """
+        SELECT
+            CAST(PR.PRHeadId AS bigint) AS PRHeadId,
+            PR.CompanyId,
+            PR.EntityId,
+            COALESCE(PR.ReqRefNumber, '') AS Number,
+            COALESCE(PR.Name, '') AS Name,
+            PR.ReqStatusId,
+            PR.IsDraft,
+            PR.IsRejected,
+            PR.Description,
+            PR.[Date] AS DocumentDate,
+            PR.RequiredDate,
+            PR.EstimatedCost,
+            PR.CurrencyId,
+            PR.ReqUserId,
+            PR.BuyerId,
+            NULLIF(
+                LTRIM(RTRIM(CONCAT(E.FirstName, ' ', E.LastName))),
+                ''
+            ) AS RequesterName,
+            C.CurrencyCode,
+            C.CurrencyName
+        FROM Procur.PRHead PR
+        LEFT JOIN Master.Employee E
+            ON PR.ReqUserId = E.Id
+            AND PR.CompanyId = E.CompanyId
+            AND (E.IsDeleted = 0 OR E.IsDeleted IS NULL)
+        LEFT JOIN Master.Currency C
+            ON PR.CurrencyId = C.Id
+            AND (C.IsDeleted = 0 OR C.IsDeleted IS NULL)
+        WHERE PR.CompanyId = @CompanyId
+          AND PR.EntityId = @EntityId
+          AND PR.ReqStatusId = @StatusCode
+          AND (PR.IsDeleted IS NULL OR PR.IsDeleted = 0)
+        ORDER BY PR.PRHeadId DESC
+        OFFSET @Offset ROWS
+        FETCH NEXT @PageSize ROWS ONLY;
+        """;
+
+        var offset = checked((page - 1) * pageSize);
+
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        var command = new CommandDefinition(
+            sql,
+            new
+            {
+                CompanyId = companyId,
+                EntityId = entityId,
+                StatusCode = statusCode,
+                Offset = offset,
+                PageSize = pageSize
+            },
+            commandTimeout: 30,
+            cancellationToken: cancellationToken);
+
+        var rows = await connection.QueryAsync<PrRow>(command);
+
+        return rows
+            .Select(MapToFacts)
+            .OfType<PrFacts>()
+            .ToList();
+    }
+
+    public async Task<int> CountAsync(
+        int statusCode,
+        CancellationToken cancellationToken)
+    {
+        if (statusCode is not (3 or 4 or 12 or 19))
+            throw new ArgumentOutOfRangeException(nameof(statusCode));
+
+        const string sql = """
+        SELECT COUNT(*)
+        FROM Procur.PRHead
+        WHERE CompanyId = @CompanyId
+          AND EntityId = @EntityId
+          AND ReqStatusId = @StatusCode
+          AND (IsDeleted IS NULL OR IsDeleted = 0);
+        """;
+
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        var command = new CommandDefinition(
+            sql,
+            new
+            {
+                CompanyId = companyId,
+                EntityId = entityId,
+                StatusCode = statusCode
+            },
+            commandTimeout: 30,
+            cancellationToken: cancellationToken);
+
+        return await connection.ExecuteScalarAsync<int>(command);
+    }
+
 
     // STEP 3: Convert the database row into our factual model.
     private static PrFacts? MapToFacts(PrRow? row)

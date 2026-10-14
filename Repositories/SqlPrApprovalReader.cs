@@ -1,7 +1,7 @@
 ﻿using Dapper;
 using Microsoft.Data.SqlClient;
 
-namespace ProQur.AI.Api;
+namespace ProQur.AI.Api.Repositories;
 
 public sealed class PrApprovalFacts
 {

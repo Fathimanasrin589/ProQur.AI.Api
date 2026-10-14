@@ -1,4 +1,4 @@
-﻿namespace ProQur.AI.Api;
+﻿namespace ProQur.AI.Api.Services;
 
 public static class PrStatusLabels
 {
