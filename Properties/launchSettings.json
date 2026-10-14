@@ -1,0 +1,12 @@
+{
+  "profiles": {
+    "ProQur.AI.Api": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      },
+      "applicationUrl": "https://localhost:60345;http://localhost:60346"
+    }
+  }
+}
